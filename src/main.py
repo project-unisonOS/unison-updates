@@ -246,6 +246,42 @@ def _manifest_target(manifest: dict[str, Any] | None, fallback_version: str) -> 
     }
 
 
+def _image_plan_steps(current_images: dict[str, Any], target_images: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    service_names = sorted(set(current_images) | set(target_images))
+    for service in service_names:
+        current_ref = str(current_images.get(service) or "")
+        target_ref = str(target_images.get(service) or "")
+        action = "hold" if current_ref == target_ref else "switch-image"
+        if not current_ref and target_ref:
+            action = "adopt-image"
+        elif current_ref and not target_ref:
+            action = "remove-image"
+        steps.append(
+            {
+                "service": service,
+                "action": action,
+                "current": current_ref,
+                "target": target_ref,
+            }
+        )
+    return steps
+
+
+def _build_execution_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    target_release = plan.get("target_release") if isinstance(plan.get("target_release"), dict) else {}
+    target_images = target_release.get("images_pinned") if isinstance(target_release.get("images_pinned"), dict) else {}
+    rollback = store.rollback_target().get("last_known_good") or {}
+    current_images = rollback.get("images_pinned") if isinstance(rollback.get("images_pinned"), dict) else {}
+    return {
+        "executor": "compose-dry-run",
+        "mode": "no-op",
+        "current_version": rollback.get("platform_version") or CURRENT_VERSION,
+        "target_version": target_release.get("platform_version") or CURRENT_VERSION,
+        "steps": _image_plan_steps(current_images, target_images),
+    }
+
+
 def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
     manifest = _load_release_manifest()
     manifest_release = manifest.get("release") if isinstance(manifest, dict) and isinstance(manifest.get("release"), dict) else {}
@@ -299,6 +335,7 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
         "images_resolved": {},
     }
     target_release = plan.get("target_release") if isinstance(plan.get("target_release"), dict) else {}
+    execution_plan = _build_execution_plan(plan)
     return {
         "ok": True,
         "job_id": job_id,
@@ -311,6 +348,7 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
             "reason": "Milestone 1 update service is wired for explicit planning and tracking; package promotion is not yet enabled.",
             "target_release": target_release,
             "rollback_target": rollback,
+            "execution_plan": execution_plan,
         },
         "created_at": _iso_now(),
         "updated_at": _iso_now(),

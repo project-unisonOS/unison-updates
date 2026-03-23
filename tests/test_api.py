@@ -56,6 +56,9 @@ def test_plan_apply_status_flow():
         assert body["status"] == "completed"
         assert (body.get("result") or {}).get("target_release", {}).get("platform_version") == "next"
         assert "rollback_target" in (body.get("result") or {})
+        execution_plan = (body.get("result") or {}).get("execution_plan") or {}
+        assert execution_plan.get("executor") == "compose-dry-run"
+        assert isinstance(execution_plan.get("steps"), list)
 
         rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
         assert rollback_resp.status_code == 200
@@ -114,6 +117,8 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
         assert apply_resp.status_code == 200
         apply_body = apply_resp.json()
         assert apply_body["result"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
+        assert apply_body["result"]["execution_plan"]["target_version"] == "v0.6.0-alpha.1"
+        assert any(step["service"] == "orchestrator" for step in apply_body["result"]["execution_plan"]["steps"])
 
         rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
         assert rollback_resp.status_code == 200

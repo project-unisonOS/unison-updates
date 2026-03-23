@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -137,6 +138,8 @@ DATA_DIR = Path(os.getenv("UNISON_UPDATES_DATA_DIR", "/var/lib/unison/updates"))
 CURRENT_VERSION = os.getenv("UNISON_IMAGE_TAG", "latest")
 PLATFORM_CHANNEL = os.getenv("UNISON_UPDATES_CHANNEL", "alpha")
 REQUIRE_SIGNATURES = os.getenv("UNISON_UPDATES_REQUIRE_SIGNATURES", "false").lower() in {"1", "true", "yes", "on"}
+MANIFEST_PATH = os.getenv("UNISON_UPDATES_MANIFEST_PATH", "").strip()
+MANIFEST_URL = os.getenv("UNISON_UPDATES_MANIFEST_URL", "").strip()
 
 store = UpdateStore(DATA_DIR)
 app = FastAPI(title="unison-updates", version="0.1.0")
@@ -155,15 +158,74 @@ def _default_catalog() -> dict[str, Any]:
     }
 
 
+def _load_release_manifest() -> dict[str, Any] | None:
+    if MANIFEST_PATH:
+        path = Path(MANIFEST_PATH)
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+    if MANIFEST_URL:
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                resp = client.get(MANIFEST_URL)
+                resp.raise_for_status()
+                body = resp.json()
+            return body if isinstance(body, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _catalog_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    release = manifest.get("release") if isinstance(manifest.get("release"), dict) else {}
+    model_packs = manifest.get("model_packs") if isinstance(manifest.get("model_packs"), dict) else {}
+    compose = manifest.get("compose") if isinstance(manifest.get("compose"), dict) else {}
+    assets = manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {}
+    target_version = release.get("version") or CURRENT_VERSION
+    return {
+        "channel": release.get("channel") or PLATFORM_CHANNEL,
+        "available": {
+            "platform": {
+                "current": CURRENT_VERSION,
+                "target": target_version,
+                "available": str(target_version) != str(CURRENT_VERSION),
+            },
+            "models": {
+                "current_pack": os.getenv("UNISON_MODEL_PACK_PROFILE", "alpha/default"),
+                "target_pack": model_packs.get("default_profile"),
+                "available": bool(model_packs.get("default_profile")),
+            },
+            "os": {"track": "ubuntu-24.04", "available": False},
+        },
+        "signature_policy": {"required": REQUIRE_SIGNATURES},
+        "manifest": {
+            "schema_version": manifest.get("schema_version"),
+            "release_version": target_version,
+            "images_pinned": compose.get("images_pinned") or {},
+            "asset_count": len(assets),
+        },
+        "checked_at": _iso_now(),
+    }
+
+
 def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
+    manifest = _load_release_manifest()
+    manifest_release = manifest.get("release") if isinstance(manifest, dict) and isinstance(manifest.get("release"), dict) else {}
     selection = arguments.get("selection") if isinstance(arguments.get("selection"), dict) else {}
     constraints = arguments.get("constraints") if isinstance(arguments.get("constraints"), dict) else {}
     person_id = arguments.get("person_id")
     target_version = (
         selection.get("platform_version")
         or selection.get("target_version")
+        or manifest_release.get("version")
         or CURRENT_VERSION
     )
+    pinned_images = {}
+    if isinstance(manifest, dict):
+        compose = manifest.get("compose") if isinstance(manifest.get("compose"), dict) else {}
+        pinned_images = compose.get("images_pinned") or {}
     plan_id = f"plan-{uuid.uuid4().hex[:12]}"
     summary = [
         {
@@ -181,6 +243,8 @@ def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
         "constraints": constraints,
         "requires_confirmation": True,
         "summary": summary,
+        "source_manifest_version": manifest_release.get("version"),
+        "images_pinned": pinned_images,
         "created_at": _iso_now(),
         "status": "planned",
     }
@@ -218,7 +282,9 @@ def ready() -> dict[str, Any]:
 
 @app.post("/v1/tools/updates.check")
 def updates_check(_: ToolRequest = Body(default_factory=ToolRequest)) -> dict[str, Any]:
-    return {"ok": True, "catalog": _default_catalog()}
+    manifest = _load_release_manifest()
+    catalog = _catalog_from_manifest(manifest) if isinstance(manifest, dict) else _default_catalog()
+    return {"ok": True, "catalog": catalog}
 
 
 @app.post("/v1/tools/updates.plan")

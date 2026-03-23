@@ -61,6 +61,8 @@ class UpdateStore:
                     "last_known_good": {
                         "platform_version": os.getenv("UNISON_IMAGE_TAG", "latest"),
                         "captured_at": _iso_now(),
+                        "images_pinned": {},
+                        "images_resolved": {},
                     }
                 },
             )
@@ -131,6 +133,14 @@ class UpdateStore:
     def rollback_target(self) -> dict[str, Any]:
         with self._lock:
             return self._read_json(self.rollback_path)
+
+    def record_update_attempt(self, last_attempted_target: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            rollback = self._read_json(self.rollback_path)
+            rollback["last_attempted_target"] = last_attempted_target
+            rollback["updated_at"] = _iso_now()
+            self._write_json(self.rollback_path, rollback)
+            return rollback
 
 
 SERVICE_PORT = int(os.getenv("UNISON_UPDATES_PORT", os.getenv("SERVICE_PORT", "8089")))
@@ -204,9 +214,21 @@ def _catalog_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             "schema_version": manifest.get("schema_version"),
             "release_version": target_version,
             "images_pinned": compose.get("images_pinned") or {},
+            "images_resolved": compose.get("images_resolved") or {},
             "asset_count": len(assets),
         },
         "checked_at": _iso_now(),
+    }
+
+
+def _manifest_target(manifest: dict[str, Any] | None, fallback_version: str) -> dict[str, Any]:
+    release = manifest.get("release") if isinstance(manifest, dict) and isinstance(manifest.get("release"), dict) else {}
+    compose = manifest.get("compose") if isinstance(manifest, dict) and isinstance(manifest.get("compose"), dict) else {}
+    return {
+        "platform_version": release.get("version") or fallback_version,
+        "channel": release.get("channel") or PLATFORM_CHANNEL,
+        "images_pinned": compose.get("images_pinned") or {},
+        "images_resolved": compose.get("images_resolved") or {},
     }
 
 
@@ -223,9 +245,11 @@ def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
         or CURRENT_VERSION
     )
     pinned_images = {}
+    resolved_images = {}
     if isinstance(manifest, dict):
         compose = manifest.get("compose") if isinstance(manifest.get("compose"), dict) else {}
         pinned_images = compose.get("images_pinned") or {}
+        resolved_images = compose.get("images_resolved") or {}
     plan_id = f"plan-{uuid.uuid4().hex[:12]}"
     summary = [
         {
@@ -245,6 +269,8 @@ def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
         "summary": summary,
         "source_manifest_version": manifest_release.get("version"),
         "images_pinned": pinned_images,
+        "images_resolved": resolved_images,
+        "target_release": _manifest_target(manifest, target_version),
         "created_at": _iso_now(),
         "status": "planned",
     }
@@ -252,6 +278,13 @@ def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
     job_id = f"job-{uuid.uuid4().hex[:12]}"
+    rollback = store.rollback_target().get("last_known_good") or {
+        "platform_version": CURRENT_VERSION,
+        "captured_at": _iso_now(),
+        "images_pinned": {},
+        "images_resolved": {},
+    }
+    target_release = plan.get("target_release") if isinstance(plan.get("target_release"), dict) else {}
     return {
         "ok": True,
         "job_id": job_id,
@@ -262,6 +295,8 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
             "applied": False,
             "mode": "dry-run",
             "reason": "Milestone 1 update service is wired for explicit planning and tracking; package promotion is not yet enabled.",
+            "target_release": target_release,
+            "rollback_target": rollback,
         },
         "created_at": _iso_now(),
         "updated_at": _iso_now(),
@@ -305,6 +340,15 @@ def updates_apply(request: ToolRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="plan_not_found")
     job = _make_job(plan, arguments.get("person_id"))
     store.save_job(job)
+    store.record_update_attempt(
+        {
+            "job_id": job["job_id"],
+            "plan_id": plan_id,
+            "requested_at": job["created_at"],
+            "target_release": (job.get("result") or {}).get("target_release") or {},
+            "rollback_target": (job.get("result") or {}).get("rollback_target") or {},
+        }
+    )
     return job
 
 
@@ -351,6 +395,7 @@ def updates_rollback(_: ToolRequest = Body(default_factory=ToolRequest)) -> dict
         "ok": True,
         "status": "ready",
         "target": rollback.get("last_known_good"),
+        "last_attempted_target": rollback.get("last_attempted_target"),
         "note": "Rollback target is recorded, but automatic platform rollback remains pending release integration.",
     }
 

@@ -54,6 +54,8 @@ def test_plan_apply_status_flow():
         body = status_resp.json()
         assert body["job_id"] == job_id
         assert body["status"] == "completed"
+        assert (body.get("result") or {}).get("target_release", {}).get("platform_version") == "next"
+        assert "rollback_target" in (body.get("result") or {})
 
 
 def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
@@ -63,7 +65,19 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
 {
   "schema_version": "unison.platform.release.manifest.v1",
   "release": {"version": "v0.6.0-alpha.1", "channel": "alpha"},
-  "compose": {"images_pinned": {"orchestrator": "ghcr.io/project-unisonos/unison-orchestrator@sha256:test"}},
+  "compose": {
+    "images_pinned": {"orchestrator": "ghcr.io/project-unisonos/unison-orchestrator@sha256:test"},
+    "images_resolved": {
+      "orchestrator": {
+        "requested_ref": "ghcr.io/project-unisonos/unison-orchestrator:latest",
+        "pinned_ref": "ghcr.io/project-unisonos/unison-orchestrator@sha256:test",
+        "image_id": "sha256:test",
+        "repo_digests": ["ghcr.io/project-unisonos/unison-orchestrator@sha256:test"],
+        "repo_tags": ["ghcr.io/project-unisonos/unison-orchestrator:latest"],
+        "source": "local-docker"
+      }
+    }
+  },
   "model_packs": {"default_profile": "alpha/default"}
 }
 """.strip()
@@ -88,3 +102,14 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
         body = plan_resp.json()
         assert body["source_manifest_version"] == "v0.6.0-alpha.1"
         assert "orchestrator" in body["images_pinned"]
+        assert "orchestrator" in body["images_resolved"]
+
+        apply_resp = client.post("/v1/tools/updates.apply", json={"arguments": {"plan_id": body["plan_id"]}})
+        assert apply_resp.status_code == 200
+        apply_body = apply_resp.json()
+        assert apply_body["result"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
+
+        rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
+        assert rollback_resp.status_code == 200
+        rollback_body = rollback_resp.json()
+        assert rollback_body["last_attempted_target"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"

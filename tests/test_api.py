@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -59,12 +60,20 @@ def test_plan_apply_status_flow():
         execution_plan = (body.get("result") or {}).get("execution_plan") or {}
         assert execution_plan.get("executor") == "compose-dry-run"
         assert isinstance(execution_plan.get("steps"), list)
+        artifacts = (body.get("result") or {}).get("artifacts") or {}
+        apply_artifact = Path((artifacts.get("apply_override") or {}).get("path", ""))
+        rollback_artifact = Path((artifacts.get("rollback_override") or {}).get("path", ""))
+        assert apply_artifact.exists()
+        assert rollback_artifact.exists()
+        assert json.loads(apply_artifact.read_text())["artifact_kind"] == "apply"
+        assert json.loads(rollback_artifact.read_text())["artifact_kind"] == "rollback"
 
         rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
         assert rollback_resp.status_code == 200
         rollback_body = rollback_resp.json()
         assert rollback_body["history_count"] == 1
         assert rollback_body["target"]["platform_version"]
+        assert Path(rollback_body["artifacts"]["rollback_override"]["path"]).exists()
 
 
 def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
@@ -119,12 +128,14 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
         assert apply_body["result"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
         assert apply_body["result"]["execution_plan"]["target_version"] == "v0.6.0-alpha.1"
         assert any(step["service"] == "orchestrator" for step in apply_body["result"]["execution_plan"]["steps"])
+        assert Path(apply_body["result"]["artifacts"]["apply_override"]["path"]).exists()
 
         rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
         assert rollback_resp.status_code == 200
         rollback_body = rollback_resp.json()
         assert rollback_body["last_attempted_target"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
         assert rollback_body["history_count"] == 1
+        assert Path(rollback_body["artifacts"]["rollback_override"]["path"]).exists()
 
 
 def test_rollback_uses_prior_release_candidate_for_latest_attempt(tmp_path, monkeypatch):

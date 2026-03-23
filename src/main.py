@@ -33,6 +33,8 @@ class UpdateStore:
 
     def __post_init__(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir = self.data_dir / "artifacts"
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.policy_path = self.data_dir / "policy.json"
         self.plans_path = self.data_dir / "plans.json"
         self.jobs_path = self.data_dir / "jobs.json"
@@ -80,6 +82,11 @@ class UpdateStore:
             json.dump(payload, fh, indent=2, sort_keys=True)
             fh.write("\n")
         tmp.replace(path)
+
+    def write_artifact(self, name: str, payload: dict[str, Any]) -> Path:
+        path = self.artifacts_dir / name
+        self._write_json(path, payload)
+        return path
 
     def read_policy(self) -> dict[str, Any]:
         with self._lock:
@@ -282,6 +289,30 @@ def _build_execution_plan(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _artifact_payload(kind: str, execution_plan: dict[str, Any], job_id: str, plan_id: str) -> dict[str, Any]:
+    return {
+        "schema_version": "unison.updates.compose.override.v1",
+        "artifact_kind": kind,
+        "job_id": job_id,
+        "plan_id": plan_id,
+        "generated_at": _iso_now(),
+        "execution_plan": execution_plan,
+        "services": {
+            step["service"]: {"image": step["target"], "action": step["action"]}
+            for step in execution_plan.get("steps") or []
+            if isinstance(step, dict) and str(step.get("service") or "").strip()
+        },
+    }
+
+
+def _artifact_ref(path: Path) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "basename": path.name,
+        "format": "json",
+    }
+
+
 def _make_plan(arguments: dict[str, Any]) -> dict[str, Any]:
     manifest = _load_release_manifest()
     manifest_release = manifest.get("release") if isinstance(manifest, dict) and isinstance(manifest.get("release"), dict) else {}
@@ -336,6 +367,26 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
     }
     target_release = plan.get("target_release") if isinstance(plan.get("target_release"), dict) else {}
     execution_plan = _build_execution_plan(plan)
+    apply_artifact_name = f"{job_id}-apply-override.json"
+    rollback_artifact_name = f"{job_id}-rollback-override.json"
+    apply_artifact = store.write_artifact(
+        apply_artifact_name,
+        _artifact_payload("apply", execution_plan, job_id, plan["plan_id"]),
+    )
+    rollback_execution_plan = {
+        "executor": execution_plan.get("executor"),
+        "mode": execution_plan.get("mode"),
+        "current_version": execution_plan.get("target_version"),
+        "target_version": rollback.get("platform_version") or CURRENT_VERSION,
+        "steps": _image_plan_steps(
+            target_release.get("images_pinned") if isinstance(target_release.get("images_pinned"), dict) else {},
+            rollback.get("images_pinned") if isinstance(rollback.get("images_pinned"), dict) else {},
+        ),
+    }
+    rollback_artifact = store.write_artifact(
+        rollback_artifact_name,
+        _artifact_payload("rollback", rollback_execution_plan, job_id, plan["plan_id"]),
+    )
     return {
         "ok": True,
         "job_id": job_id,
@@ -349,6 +400,10 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
             "target_release": target_release,
             "rollback_target": rollback,
             "execution_plan": execution_plan,
+            "artifacts": {
+                "apply_override": _artifact_ref(apply_artifact),
+                "rollback_override": _artifact_ref(rollback_artifact),
+            },
         },
         "created_at": _iso_now(),
         "updated_at": _iso_now(),
@@ -365,6 +420,7 @@ def _make_history_entry(job: dict[str, Any]) -> dict[str, Any]:
         "target_release": result.get("target_release") or {},
         "rollback_target": result.get("rollback_target") or {},
         "mode": result.get("mode"),
+        "artifacts": result.get("artifacts") or {},
     }
 
 
@@ -449,12 +505,14 @@ def updates_cancel(request: ToolRequest) -> dict[str, Any]:
 def updates_rollback(_: ToolRequest = Body(default_factory=ToolRequest)) -> dict[str, Any]:
     rollback = store.rollback_target()
     history = store.list_history()
-    prior_candidate = history[-1]["rollback_target"] if history else rollback.get("last_known_good")
+    last_attempt = history[-1] if history else rollback.get("last_attempted_target")
+    prior_candidate = (last_attempt or {}).get("rollback_target") if isinstance(last_attempt, dict) else rollback.get("last_known_good")
     return {
         "ok": True,
         "status": "ready",
         "target": prior_candidate,
         "last_attempted_target": rollback.get("last_attempted_target"),
+        "artifacts": (last_attempt or {}).get("artifacts") if isinstance(last_attempt, dict) else {},
         "history_count": len(history),
         "history_tail": history[-5:],
         "note": "Rollback target is recorded, but automatic platform rollback remains pending release integration.",

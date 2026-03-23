@@ -57,6 +57,12 @@ def test_plan_apply_status_flow():
         assert (body.get("result") or {}).get("target_release", {}).get("platform_version") == "next"
         assert "rollback_target" in (body.get("result") or {})
 
+        rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
+        assert rollback_resp.status_code == 200
+        rollback_body = rollback_resp.json()
+        assert rollback_body["history_count"] == 1
+        assert rollback_body["target"]["platform_version"]
+
 
 def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
@@ -113,3 +119,54 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
         assert rollback_resp.status_code == 200
         rollback_body = rollback_resp.json()
         assert rollback_body["last_attempted_target"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
+        assert rollback_body["history_count"] == 1
+
+
+def test_rollback_uses_prior_release_candidate_for_latest_attempt(tmp_path, monkeypatch):
+    manifest_a = tmp_path / "manifest-a.json"
+    manifest_b = tmp_path / "manifest-b.json"
+    manifest_a.write_text(
+        """
+{
+  "schema_version": "unison.platform.release.manifest.v1",
+  "release": {"version": "v0.6.0-alpha.1", "channel": "alpha"},
+  "compose": {"images_pinned": {"updates": "ghcr.io/project-unisonos/unison-updates@sha256:a"}},
+  "model_packs": {"default_profile": "alpha/default"}
+}
+""".strip()
+    )
+    manifest_b.write_text(
+        """
+{
+  "schema_version": "unison.platform.release.manifest.v1",
+  "release": {"version": "v0.6.1-alpha.1", "channel": "alpha"},
+  "compose": {"images_pinned": {"updates": "ghcr.io/project-unisonos/unison-updates@sha256:b"}},
+  "model_packs": {"default_profile": "alpha/default"}
+}
+""".strip()
+    )
+
+    import src.main as main
+
+    monkeypatch.setattr(main, "MANIFEST_PATH", str(manifest_a))
+    main.store = main.UpdateStore(tmp_path / "data")
+
+    with TestClient(main.app) as client:
+        plan_a = client.post("/v1/tools/updates.plan", json={"arguments": {"selection": {}, "constraints": {}}})
+        assert plan_a.status_code == 200
+        apply_a = client.post("/v1/tools/updates.apply", json={"arguments": {"plan_id": plan_a.json()["plan_id"]}})
+        assert apply_a.status_code == 200
+
+        monkeypatch.setattr(main, "MANIFEST_PATH", str(manifest_b))
+        plan_b = client.post("/v1/tools/updates.plan", json={"arguments": {"selection": {}, "constraints": {}}})
+        assert plan_b.status_code == 200
+        apply_b = client.post("/v1/tools/updates.apply", json={"arguments": {"plan_id": plan_b.json()["plan_id"]}})
+        assert apply_b.status_code == 200
+
+        rollback_resp = client.post("/v1/tools/updates.rollback", json={"arguments": {}})
+        assert rollback_resp.status_code == 200
+        rollback_body = rollback_resp.json()
+        assert rollback_body["history_count"] == 2
+        assert rollback_body["last_attempted_target"]["target_release"]["platform_version"] == "v0.6.1-alpha.1"
+        assert rollback_body["target"]["platform_version"] == "latest"
+        assert len(rollback_body["history_tail"]) == 2

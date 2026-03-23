@@ -36,6 +36,7 @@ class UpdateStore:
         self.policy_path = self.data_dir / "policy.json"
         self.plans_path = self.data_dir / "plans.json"
         self.jobs_path = self.data_dir / "jobs.json"
+        self.history_path = self.data_dir / "history.json"
         self.rollback_path = self.data_dir / "rollback.json"
         self._ensure_defaults()
 
@@ -54,6 +55,8 @@ class UpdateStore:
         for path in (self.plans_path, self.jobs_path):
             if not path.exists():
                 self._write_json(path, {})
+        if not self.history_path.exists():
+            self._write_json(self.history_path, [])
         if not self.rollback_path.exists():
             self._write_json(
                 self.rollback_path,
@@ -134,10 +137,21 @@ class UpdateStore:
         with self._lock:
             return self._read_json(self.rollback_path)
 
-    def record_update_attempt(self, last_attempted_target: dict[str, Any]) -> dict[str, Any]:
+    def list_history(self) -> list[dict[str, Any]]:
         with self._lock:
+            history = self._read_json(self.history_path)
+            return history if isinstance(history, list) else []
+
+    def record_update_attempt(self, attempt: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            history = self._read_json(self.history_path)
+            if not isinstance(history, list):
+                history = []
+            history.append(attempt)
+            self._write_json(self.history_path, history)
+
             rollback = self._read_json(self.rollback_path)
-            rollback["last_attempted_target"] = last_attempted_target
+            rollback["last_attempted_target"] = attempt
             rollback["updated_at"] = _iso_now()
             self._write_json(self.rollback_path, rollback)
             return rollback
@@ -303,6 +317,19 @@ def _make_job(plan: dict[str, Any], person_id: str | None) -> dict[str, Any]:
     }
 
 
+def _make_history_entry(job: dict[str, Any]) -> dict[str, Any]:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    return {
+        "job_id": job["job_id"],
+        "plan_id": job["plan_id"],
+        "requested_at": job["created_at"],
+        "status": job["status"],
+        "target_release": result.get("target_release") or {},
+        "rollback_target": result.get("rollback_target") or {},
+        "mode": result.get("mode"),
+    }
+
+
 @app.get("/health")
 @app.get("/healthz")
 def health() -> dict[str, Any]:
@@ -340,15 +367,7 @@ def updates_apply(request: ToolRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="plan_not_found")
     job = _make_job(plan, arguments.get("person_id"))
     store.save_job(job)
-    store.record_update_attempt(
-        {
-            "job_id": job["job_id"],
-            "plan_id": plan_id,
-            "requested_at": job["created_at"],
-            "target_release": (job.get("result") or {}).get("target_release") or {},
-            "rollback_target": (job.get("result") or {}).get("rollback_target") or {},
-        }
-    )
+    store.record_update_attempt(_make_history_entry(job))
     return job
 
 
@@ -391,11 +410,15 @@ def updates_cancel(request: ToolRequest) -> dict[str, Any]:
 @app.post("/v1/tools/updates.rollback")
 def updates_rollback(_: ToolRequest = Body(default_factory=ToolRequest)) -> dict[str, Any]:
     rollback = store.rollback_target()
+    history = store.list_history()
+    prior_candidate = history[-1]["rollback_target"] if history else rollback.get("last_known_good")
     return {
         "ok": True,
         "status": "ready",
-        "target": rollback.get("last_known_good"),
+        "target": prior_candidate,
         "last_attempted_target": rollback.get("last_attempted_target"),
+        "history_count": len(history),
+        "history_tail": history[-5:],
         "note": "Rollback target is recorded, but automatic platform rollback remains pending release integration.",
     }
 

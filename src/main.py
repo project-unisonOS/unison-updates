@@ -163,6 +163,27 @@ class UpdateStore:
             self._write_json(self.rollback_path, rollback)
             return rollback
 
+    def update_history_entry(self, job_id: str, **patch: Any) -> dict[str, Any] | None:
+        with self._lock:
+            history = self._read_json(self.history_path)
+            if not isinstance(history, list):
+                return None
+            for idx, entry in enumerate(history):
+                if isinstance(entry, dict) and entry.get("job_id") == job_id:
+                    entry.update(patch)
+                    history[idx] = entry
+                    self._write_json(self.history_path, history)
+                    return entry
+            return None
+
+    def set_last_known_good(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            rollback = self._read_json(self.rollback_path)
+            rollback["last_known_good"] = payload
+            rollback["updated_at"] = _iso_now()
+            self._write_json(self.rollback_path, rollback)
+            return rollback
+
 
 SERVICE_PORT = int(os.getenv("UNISON_UPDATES_PORT", os.getenv("SERVICE_PORT", "8089")))
 DATA_DIR = Path(os.getenv("UNISON_UPDATES_DATA_DIR", "/var/lib/unison/updates"))
@@ -421,6 +442,20 @@ def _make_history_entry(job: dict[str, Any]) -> dict[str, Any]:
         "rollback_target": result.get("rollback_target") or {},
         "mode": result.get("mode"),
         "artifacts": result.get("artifacts") or {},
+        "applied": False,
+    }
+
+
+def _applied_payload(job: dict[str, Any]) -> dict[str, Any]:
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    target_release = result.get("target_release") if isinstance(result.get("target_release"), dict) else {}
+    return {
+        "platform_version": target_release.get("platform_version") or CURRENT_VERSION,
+        "captured_at": _iso_now(),
+        "images_pinned": target_release.get("images_pinned") or {},
+        "images_resolved": target_release.get("images_resolved") or {},
+        "source_job_id": job.get("job_id"),
+        "source_plan_id": job.get("plan_id"),
     }
 
 
@@ -517,6 +552,29 @@ def updates_rollback(_: ToolRequest = Body(default_factory=ToolRequest)) -> dict
         "history_tail": history[-5:],
         "note": "Rollback target is recorded, but automatic platform rollback remains pending release integration.",
     }
+
+
+@app.post("/v1/tools/updates.record_applied")
+def updates_record_applied(request: ToolRequest) -> dict[str, Any]:
+    arguments = request.arguments or {}
+    job_id = arguments.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise HTTPException(status_code=400, detail="job_id_required")
+    job = store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_not_found")
+
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    applied_at = _iso_now()
+    result["applied"] = True
+    result["applied_at"] = applied_at
+    updated_job = store.update_job(job_id, status="applied", result=result)
+    if not updated_job:
+        raise HTTPException(status_code=404, detail="job_not_found")
+
+    store.update_history_entry(job_id, applied=True, applied_at=applied_at, status="applied")
+    rollback = store.set_last_known_good(_applied_payload(updated_job))
+    return {"ok": True, "job": updated_job, "last_known_good": rollback.get("last_known_good")}
 
 
 @app.post("/v1/tools/updates.whats_new")

@@ -75,6 +75,13 @@ def test_plan_apply_status_flow():
         assert rollback_body["target"]["platform_version"]
         assert Path(rollback_body["artifacts"]["rollback_override"]["path"]).exists()
 
+        record_resp = client.post("/v1/tools/updates.record_applied", json={"arguments": {"job_id": job_id}})
+        assert record_resp.status_code == 200
+        record_body = record_resp.json()
+        assert record_body["job"]["status"] == "applied"
+        assert record_body["job"]["result"]["applied"] is True
+        assert record_body["last_known_good"]["platform_version"] == "next"
+
 
 def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
     manifest_path = tmp_path / "manifest.json"
@@ -136,6 +143,10 @@ def test_manifest_drives_catalog_and_plan(tmp_path, monkeypatch):
         assert rollback_body["last_attempted_target"]["target_release"]["platform_version"] == "v0.6.0-alpha.1"
         assert rollback_body["history_count"] == 1
         assert Path(rollback_body["artifacts"]["rollback_override"]["path"]).exists()
+
+        record_resp = client.post("/v1/tools/updates.record_applied", json={"arguments": {"job_id": apply_body["job_id"]}})
+        assert record_resp.status_code == 200
+        assert record_resp.json()["last_known_good"]["platform_version"] == "v0.6.0-alpha.1"
 
 
 def test_rollback_uses_prior_release_candidate_for_latest_attempt(tmp_path, monkeypatch):

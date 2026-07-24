@@ -105,3 +105,33 @@ class Verifier:
         self.state.channel_versions[channel] = version
         self.state.target_versions[channel] = target_version
         return target
+
+    def verify_target_receipt(
+        self,
+        envelope: dict,
+        artifact: bytes,
+        expected_channel: str,
+        hardware: dict[str, str],
+        now: datetime,
+    ) -> dict:
+        """Verify signed metadata and emit the exact staging authorization."""
+        target = self.verify_channel(envelope, artifact, expected_channel, hardware, now)
+        signed = envelope["signed"]
+        return {
+            "schema_version": "unison.updates.verified-target.v1",
+            "verified_at": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "trusted_root_version": self.state.root_version,
+            "channel": expected_channel,
+            "channel_metadata_version": int(signed["version"]),
+            "target": {
+                "path": target["path"],
+                "version": int(target["version"]),
+                "release_version": str(target["custom"]["release_version"]),
+                "length": int(target["length"]),
+                "sha256": target["hashes"]["sha256"],
+                "hardware": dict(target["custom"]["hardware"]),
+                "restart": bool(target["custom"].get("restart")),
+                "backup_required": bool(target["custom"].get("backup_required")),
+            },
+            "evidence": {"channel_metadata": envelope},
+        }

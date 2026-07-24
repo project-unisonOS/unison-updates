@@ -39,6 +39,15 @@ role thresholds, rejects expired or non-monotonic channel metadata and target
 versions, binds a target to its channel and hardware profile, and verifies
 artifact length and SHA-256 before the target can be staged.
 
+Successful verification can emit
+`unison.updates.verified-target.v1`. This receipt binds the locally verified
+root and channel metadata versions to the exact artifact length, SHA-256,
+target and release versions, channel, hardware profile, restart requirement,
+and checkpoint requirement. The privileged platform lifecycle still verifies the signed
+release bundle and the receipt's original signed channel-metadata evidence
+against its separately pinned update root before it accepts the target for
+staging.
+
 Root rotation must advance exactly one version and meet both the currently
 trusted root threshold and the proposed root threshold. This permits controlled
 key replacement without allowing a single new online key to replace trust.

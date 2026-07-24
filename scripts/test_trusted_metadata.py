@@ -63,7 +63,12 @@ def metadata(private, artifact, version=1, target_version=1, channel="stable",
         "target": {
             "path": "unisonos-v1.bundle", "version": target_version,
             "length": len(artifact), "hashes": {"sha256": hashlib.sha256(artifact).hexdigest()},
-            "custom": {"hardware": hardware, "restart": True, "backup_required": True},
+            "custom": {
+                "hardware": hardware,
+                "release_version": "v1",
+                "restart": True,
+                "backup_required": True,
+            },
         },
     }
     return envelope(signed, private, ("k0",))
@@ -83,8 +88,18 @@ def main():
     artifact = b"signed release candidate"
 
     verifier = Verifier(trusted, ClientState(1, {}, {}))
-    target = verifier.verify_channel(metadata(private, artifact), artifact, "stable", HARDWARE, NOW)
-    assert target["custom"]["backup_required"]
+    receipt = verifier.verify_target_receipt(
+        metadata(private, artifact), artifact, "stable", HARDWARE, NOW
+    )
+    assert receipt["schema_version"] == "unison.updates.verified-target.v1"
+    assert receipt["trusted_root_version"] == 1
+    assert receipt["channel_metadata_version"] == 1
+    assert receipt["target"]["backup_required"]
+    assert receipt["target"]["length"] == len(artifact)
+    assert receipt["target"]["release_version"] == "v1"
+    assert receipt["target"]["sha256"] == hashlib.sha256(artifact).hexdigest()
+    assert receipt["target"]["hardware"] == HARDWARE
+    assert receipt["evidence"]["channel_metadata"]["signed"]["_type"] == "targets"
 
     rejects(lambda: verifier.verify_channel(
         metadata(private, artifact), artifact, "stable", HARDWARE, NOW

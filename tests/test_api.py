@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
+_IMPORT_DATA_DIR = tempfile.TemporaryDirectory()
+os.environ["UNISON_UPDATES_DATA_DIR"] = _IMPORT_DATA_DIR.name
 
 
 def _client():

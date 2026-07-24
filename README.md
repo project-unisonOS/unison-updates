@@ -30,3 +30,19 @@ uvicorn src.main:app --host 0.0.0.0 --port 8089
 - State is persisted to JSON under `UNISON_UPDATES_DATA_DIR` so policy, plans, and jobs survive container restarts.
 - This is a Milestone 1 local-first implementation focused on explicit update planning, job tracking, and rollback posture.
 - Actual package/image application is stubbed behind explicit plans until the platform release/install path is fully integrated.
+
+## Signed channel metadata
+
+`src/trusted_metadata.py` is the Phase 9 client-side trust boundary for
+development, preview, and stable metadata. It uses canonical JSON and Ed25519
+role thresholds, rejects expired or non-monotonic channel metadata and target
+versions, binds a target to its channel and hardware profile, and verifies
+artifact length and SHA-256 before the target can be staged.
+
+Root rotation must advance exactly one version and meet both the currently
+trusted root threshold and the proposed root threshold. This permits controlled
+key replacement without allowing a single new online key to replace trust.
+
+The verifier deliberately does not activate an update. Platform staging,
+checkpointing, health validation, promotion, and rollback remain separate
+privileged operations.
